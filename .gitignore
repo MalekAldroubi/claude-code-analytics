@@ -1,0 +1,35 @@
+# Data files (too large for git, regenerate with generate_fake_data.py)
+data/telemetry_logs.jsonl
+data/analytics.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Byte-compiled
+*.pyc
