@@ -2,96 +2,237 @@
 
 ## Tools Used
 
-- **Claude (Anthropic)**: Used throughout for code generation, schema design support, and documentation drafting
-- **VS Code**: Primary development environment with Python extensions for linting and debugging
+- **Claude (Anthropic)**: Used for code generation, schema design, and documentation help
+- **VS Code**: Development environment with Python extensions
 
 ## My Approach
 
-I used Claude as a development assistant, while keeping full ownership of architectural decisions and validation.
+Before starting, I read through Anthropic's prompt engineering documentation to understand how to get the best results from Claude. The main takeaways I applied were: using XML-style tags to structure my requests, being very specific about what I want (and what I don't want), and asking Claude to think step by step for complex tasks.
 
-I defined the data model requirements, identified the key analytics questions, and guided the implementation step by step. Claude helped accelerate development, but I reviewed, tested, and refined every output before committing.
-
-This reflects how I believe AI should be used in practice: the engineer drives the design and reasoning, while the LLM supports execution and iteration.
+I tried to treat Claude like a coding partner rather than a magic box. I would figure out what I needed first, then write a detailed prompt explaining the goal, the data, the constraints, and the expected output. This worked much better than vague requests.
 
 ## Development Workflow
 
-| Phase | My Role | Claude's Role |
-|-------|---------|---------------|
-| Data Exploration | Analyzed the JSONL structure, identified event types, mapped field relationships | N/A |
-| Schema Design | Defined normalization strategy, chose SQLite with WAL mode, specified indexes based on expected query patterns | Generated initial CREATE TABLE statements from my specifications |
-| Ingestion Pipeline | Designed the batch-insert approach, defined validation checks | Helped implement parsing logic and batch insert structure |
-| Analytics Layer | Identified key business questions and defined metric logic (including anomaly detection) | Translated logic into SQL queries and pandas-compatible functions |
-| Dashboard | Designed layout, selected metrics and visualizations | Generated Streamlit components and initial chart implementations |
-| API Layer | Defined endpoint structure and expected responses | Helped scaffold FastAPI routes |
+| Phase | What I Did | What Claude Helped With |
+|-------|------------|------------------------|
+| Data Exploration | Read through the JSONL structure, identified the 5 event types, understood how events relate to each other | N/A, this was manual exploration |
+| Schema Design | Decided on normalized tables, picked which columns to index | Generated the SQL CREATE TABLE statements from my spec |
+| Ingestion Pipeline | Planned the batch-insert approach after the first version was too slow | Wrote the parsing and insert logic |
+| Analytics Layer | Listed the business questions I wanted to answer | Turned my questions into SQL queries and pandas functions |
+| Dashboard | Picked which charts to use for each metric | Built the Streamlit pages and Plotly charts |
+| API | Decided on the endpoint structure | Scaffolded the FastAPI routes |
 
-## Key Prompts & What I Learned
+## Prompt Engineering Approach
 
-### 1. Data Modeling
+Following Anthropic's recommendations, I structured my prompts with:
 
-**What I asked**:  
-"I need a normalized schema for this telemetry data. The JSONL has nested batches with logEvents, each containing a message JSON with body, attributes, resource, and scope. I want separate tables for each event type (api_request, tool_decision, tool_result, user_prompt, api_error) plus a sessions table derived from session.id grouping and an employees table from the CSV. Use proper foreign keys and add indexes on session_id, user_email, timestamp, and tool_name since those are the columns I'll filter on most in the dashboard."
+- **`<role>`** to set context for what kind of task Claude is doing
+- **`<context>`** to provide all the relevant background information
+- **`<task>`** with numbered steps for complex requests
+- **`<constraints>`** to prevent common mistakes and specify what I don't want
+- **`<output_format>`** to define exactly what the deliverable should look like
 
-**What I validated**:  
-- Verified schema consistency with raw data  
-- Tested query performance using EXPLAIN QUERY PLAN  
-- Ensured joins between api_requests and employees were efficient at scale  
+I found that the more specific I was, the less I had to fix afterwards. Below are some examples.
+
+## Key Prompts
+
+### 1. Schema Design
+
+This was the first and most important prompt. I spent time understanding the data before writing it.
+
+**Prompt:**
+
+```
+<role>
+You are a data engineer designing a database schema for a telemetry analytics platform.
+</role>
+
+<context>
+I have a JSONL file (521 MB) containing Claude Code telemetry data. Each line is a
+CloudWatch-style log batch with this structure:
+- Top level: messageType, owner, logGroup, logStream, logEvents[]
+- Each logEvent contains a "message" field which is a JSON string
+- The message JSON has: body (event type), attributes (event-specific fields),
+  resource (host/user environment), scope (instrumentation metadata)
+
+There are 5 event types identified by the "body" field:
+- claude_code.api_request: model calls with tokens, cost, duration
+- claude_code.tool_decision: accept/reject decisions for tool usage
+- claude_code.tool_result: execution outcomes with success/failure
+- claude_code.user_prompt: user messages with prompt length
+- claude_code.api_error: failures with status codes and error messages
+
+I also have an employees.csv with: email, full_name, practice, level, location.
+</context>
+
+<task>
+Design a normalized SQLite schema with these requirements:
+1. Separate table for each event type (not a flat table, because query patterns differ)
+2. A sessions table derived from grouping by session.id across all events
+3. An employees table loaded from the CSV
+4. Foreign keys linking sessions to employees via user_email
+5. Indexes on: session_id, user_email, timestamp, tool_name, model
+   (these are the columns I will filter on most in dashboard queries)
+6. Use appropriate types: INTEGER for tokens, REAL for cost, TEXT for timestamps
+</task>
+
+<constraints>
+- Do not create a single flat table for all events
+- Do not use an ORM, use raw SQL with sqlite3
+- Include PRAGMA optimizations (WAL mode, cache size)
+</constraints>
+
+<output_format>
+A Python module (database.py) with:
+- get_connection() function with PRAGMA settings
+- create_schema() function with all CREATE TABLE and CREATE INDEX statements
+</output_format>
+```
+
+**How I checked it:** Verified the table structure matches the raw data fields. Ran test queries to make sure JOINs between tables worked. Confirmed zero orphaned records after ingestion.
 
 ---
 
-### 2. Anomaly Detection Design
+### 2. Anomaly Detection
 
-**What I asked**:  
-"Implement two anomaly detection methods. First: daily cost anomalies using a 7-day rolling mean with 2 standard deviations as the threshold. Second: per-user anomalies comparing each user's daily spend to their own historical mean + 2 sigma. Only include users with at least 3 active days."
+I wanted to add this as a bonus feature. I had to think about what "anomaly" means in this context before prompting.
 
-**What I validated**:  
-- Checked that anomaly thresholds produced reasonable results  
-- Ensured low-activity users were excluded to avoid noise  
-- Verified output matched expected statistical behavior  
+**Prompt:**
+
+```
+<role>
+You are a data analyst implementing anomaly detection for a cost monitoring system.
+</role>
+
+<context>
+I have daily cost data from an api_requests table over 60 days. I also have
+per-user daily cost breakdowns. I need to flag unusual cost patterns at two levels.
+</context>
+
+<task>
+Implement two anomaly detection methods:
+
+Method 1 - Daily cost anomalies:
+- Compute a 7-day rolling mean of total daily cost
+- Compute a 7-day rolling standard deviation
+- Flag any day where actual cost falls outside mean +/- 2 standard deviations
+- Return the full dataframe with: date, total_cost, rolling_avg, upper_bound,
+  lower_bound, is_anomaly
+
+Method 2 - Per-user spending anomalies:
+- For each user, compute their personal average daily cost and standard deviation
+- Flag user-days where spend exceeds their own mean + 2 sigma
+- Only include users with at least 3 active days (to avoid false positives
+  from low sample sizes)
+- Return: user_email, full_name, practice, date, daily_cost, avg_daily_cost, threshold
+
+Think through this step by step before writing the code.
+</task>
+
+<constraints>
+- Method 1 should use pandas rolling() for clean implementation
+- Method 2 should be a single SQL query using CTEs (WITH clauses), not Python loops
+- Both should be functions in analytics.py that return DataFrames
+- Handle edge cases: fillna(0) for early days with insufficient rolling window
+</constraints>
+```
+
+**How I checked it:** Made sure the threshold flagged a reasonable number of days (1 out of 60). Verified that users with fewer than 3 active days were excluded. Looked at the flagged anomalies to confirm they were actual cost spikes, not noise.
 
 ---
 
-### 3. Dashboard Architecture
+### 3. Dashboard
 
-**What I asked**:  
-"Build the dashboard with multiple pages including overview KPIs, cost analysis, usage trends, model comparison, tool usage, error analysis, and anomaly detection."
+For the dashboard, I learned that specifying exact chart types matters a lot. My first attempt was vague ("build a dashboard for this data") and the result was generic. The version below worked much better.
 
-**What I validated**:  
-- Cross-checked KPI values across different views  
-- Ensured charts matched underlying SQL results  
-- Verified filters and aggregations behaved correctly  
+**Prompt:**
+
+```
+<role>
+You are a frontend data engineer building an analytics dashboard.
+</role>
+
+<context>
+I have an analytics.py module with 20+ query functions returning pandas DataFrames.
+The data covers Claude Code usage: costs, models, tools, errors, sessions, users.
+The audience is engineering managers who need quick insights.
+</context>
+
+<task>
+Build a multi-page Streamlit dashboard with these pages and chart types:
+
+1. Overview: 8 KPI cards + area chart (daily cost) + bar (active users) +
+   bar (cost by practice) + donut (cost by model)
+
+2. Cost Analysis: 4 tabs (by model, by practice, by level, top users).
+   Bar charts with values displayed. Data tables below each.
+
+3. Usage Trends: Line chart with metric dropdown + 7-day rolling average overlay.
+   Hour-of-day bar chart with business hours (9-17) highlighted in blue.
+   Day-of-week bars with weekdays green, weekends red.
+
+4. Model Analysis: Bar charts for cost-per-1K-tokens and tokens-per-second.
+   Bubble scatter (x=duration, y=cost, size=requests, color=model).
+   Stacked area chart for model adoption over time.
+
+5. Tool Analysis: Bar chart colored by acceptance rate.
+   Heatmap of tool usage by practice.
+
+6. Error Analysis: Horizontal bars for error types by status code.
+   Area chart for daily error count.
+
+7. User Insights: Scatter plots (sessions vs cost, active days vs cost).
+   Pie charts for terminal/IDE and OS.
+
+8. Anomaly Detection: Line with confidence band, rolling average as dashed,
+   anomaly points as red X markers.
+</task>
+
+<constraints>
+- Dark theme (background #0e1117, cards #1a1f2e)
+- Plotly for all charts, not matplotlib
+- Consistent colors across pages
+- Transparent chart backgrounds
+</constraints>
+```
+
+**How I checked it:** Opened every page and made sure charts load. Cross-checked that the total cost on the Overview page matches the sum on the Cost Analysis page. Verified filters and dropdowns work.
 
 ---
 
-### 4. Performance Optimization
+### 4. Performance Fix
 
-**What I asked**:  
-"The ingestion is slow with row-by-row inserts. Refactor to use batch inserts with executemany and optimize SQLite settings."
+This one was short because the problem was clear.
 
-**Result**:  
-- Reduced ingestion time significantly  
-- Applied WAL mode and caching to improve performance  
-- Confirmed improvements by measuring execution time  
+**Prompt:**
 
----
+```
+<task>
+The ingestion is too slow with row-by-row inserts (~120 seconds for 454K events).
+Refactor to batch inserts: accumulate rows in lists, flush every 5000 rows with
+executemany(), enable WAL mode, set cache_size to 64MB.
+</task>
+```
 
-## Validation Process
-
-Every piece of AI-generated code was validated before use:
-
-1. Confirmed code runs without errors  
-2. Verified row counts and aggregate values against raw data  
-3. Checked for data consistency across tables  
-4. Cross-validated dashboard outputs with direct SQL queries  
-5. Ensured API responses match displayed metrics  
+**Result:** Went from ~120s to ~20s.
 
 ---
 
-## Reflections
+## Validation
 
-Using Claude helped speed up implementation and reduce time spent on repetitive coding and syntax lookups.
+For every piece of generated code, I checked:
 
-However, the most important part was maintaining control over design decisions and validating results carefully. In some cases, I adjusted or simplified the generated code to better fit the structure I had in mind.
+1. Does it run without errors?
+2. Do the row counts match what the data generator reports?
+3. Do the numbers on the dashboard match direct SQL queries?
+4. Are there any orphaned or missing records?
 
-For example, an initial suggestion was to use a single flat table for all events, but I chose a normalized schema because it better supports the different query patterns needed for analysis.
+---
 
-Overall, this approach allowed me to move faster while still understanding and verifying every part of the system.
+## What I Learned
+
+- Structured prompts with XML tags consistently gave better results than freeform requests
+- Being specific about what I don't want (constraints) was just as important as what I do want
+- The first version of most outputs needed some adjustment, but having a solid starting point saved a lot of time
+- Understanding the data before prompting was essential. I couldn't have written these prompts without first exploring the JSONL structure manually
+- AI is a great accelerator, but I still needed to understand what I was building to validate the output

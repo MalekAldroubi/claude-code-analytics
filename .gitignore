@@ -33,3 +33,5 @@ Thumbs.db
 
 # Byte-compiled
 *.pyc
+
+slides/generate_presentation_LOCAL.py
